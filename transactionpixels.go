@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"os"
+	"pudding-grid/blockchain"
 	"sort"
 	"strconv"
 	"sync"
@@ -44,16 +45,19 @@ type transactionPixels struct {
 	// How many goroutines we still have free
 	goroutines int
 	// The big arrays from the files
-	firstTxi []uint64
-	firstTxo []uint64
-	txiTx    []uint32
-	txiVout  []uint32
-	txoValue []uint64
-	red      []byte
-	green    []byte
-	blue     []byte
-	octarine []byte
-	hashMSBs []uint32
+	//firstTxi []uint64
+	//firstTxo []uint64
+	//txiTx    []uint32
+	//txiVout  []uint32
+	//txoValue []uint64
+	//red      []byte
+	//green    []byte
+	//blue     []byte
+	//octarine []byte
+	//hashMSBs []uint32
+
+	// The data in the above commented arrays are now provided by the following object
+	chain blockchain.ChainLikeFiles
 }
 
 // Represents the data gathered regarding a pixel before a pixel is completely known
@@ -66,86 +70,10 @@ type transPixel struct {
 	areaEstimate          floatCoords
 }
 
-func createTransactionImage(transactionIndex uint32) error {
-	var fwm fileWriteManager
-	err := fwm.readConfig()
-	if err != nil {
-		return err
-	}
-	fwm.configureFileChoices()
-	fwm.openFiles()
-	defer fwm.closeFiles()
-
-	println("Reading firstTxi file")
-	firstTxi, err := fwm.flatFileInts["TransFirstTxi"].wholeFileAsInt64()
-	if err != nil {
-		println("Could not read TransFirstTxi file")
-		return err
-	}
-
-	println("Reading firstTxo file")
-	firstTxo, err := fwm.flatFileInts["TransFirstTxo"].wholeFileAsInt64()
-	if err != nil {
-		println("Could not read TransFirstTxi file")
-		return err
-	}
-
-	println("Reading TxiTx file")
-	txiTx, err := fwm.flatFileInts["TxiTx"].wholeFileAsInt32()
-	if err != nil {
-		println("Could not read TxiTx file")
-		return err
-	}
-
-	println("Reading TxiVout file")
-	txiVout, err := fwm.flatFileInts["TxiVout"].wholeFileAsInt32()
-	if err != nil {
-		println("Could not read TxiVout file")
-		return err
-	}
-
-	println("Reading TxoValue file")
-	txoValue, err := fwm.flatFileInts["TxoValue"].wholeFileAsInt64()
-	if err != nil {
-		println("Could not read TxoValue file")
-		return err
-	}
-
-	println("Reading colourdb files: Red")
-	red, err := fwm.flatFileInts["TransRed"].wholeFileAsByte()
-	if err != nil {
-		println("Could not read TransRed file")
-		return err
-	}
-	println("Reading colourdb files: Green")
-	green, err := fwm.flatFileInts["TransGreen"].wholeFileAsByte()
-	if err != nil {
-		println("Could not read TransGreen file")
-		return err
-	}
-	println("Reading colourdb files: Blue")
-	blue, err := fwm.flatFileInts["TransBlue"].wholeFileAsByte()
-	if err != nil {
-		println("Could not read TransBlue file")
-		return err
-	}
-	println("Reading colourdb files: Octarine")
-	octarine, err := fwm.flatFileInts["TransOctarine"].wholeFileAsByte()
-	if err != nil {
-		println("Could not read TransOctarine file")
-		return err
-	}
-
-	println("Reading hashMSBs file")
-	hashMSBs, err := fwm.transHashLookupFiles.WholeFileAsInt32()
-	if err != nil {
-		println("Could not read hashes file")
-		return err
-	}
-
+func createTransactionImage(transactionIndex uint32, chain blockchain.ChainReader) error {
 	//for zoom := 1; zoom <= 1048576*1048576; zoom *= 4 {
 	for zoom := 1; zoom <= 1; zoom *= 4 {
-		tp := NewTransactionPixels(firstTxi, firstTxo, txiTx, txiVout, txoValue, red, green, blue, octarine, hashMSBs, floatCoords(zoom))
+		tp := NewTransactionPixels(chain, floatCoords(zoom))
 		tp.drawTransactionPixels(transactionIndex)
 		tp.outputGraphicsFile(zoom)
 	}
@@ -153,7 +81,7 @@ func createTransactionImage(transactionIndex uint32) error {
 	return nil
 }
 
-func NewTransactionPixels(firstTxi []uint64, firstTxo []uint64, txiTx []uint32, txiVout []uint32, txoValue []uint64, red []byte, green []byte, blue []byte, octarine []byte, hashMSBs []uint32, zoom floatCoords) *transactionPixels {
+func NewTransactionPixels(chain blockchain.ChainLikeFiles, zoom floatCoords) *transactionPixels {
 	tp := new(transactionPixels)
 	tp.width = 1000
 	tp.height = 1000
@@ -218,17 +146,10 @@ func NewTransactionPixels(firstTxi []uint64, firstTxo []uint64, txiTx []uint32, 
 	tp.maxContributions = 30
 	tp.maxGoroutines = 2
 	tp.goroutines = tp.maxGoroutines
-	// The arrays from files
-	tp.firstTxi = firstTxi
-	tp.firstTxo = firstTxo
-	tp.txiTx = txiTx
-	tp.txiVout = txiVout
-	tp.txoValue = txoValue
-	tp.red = red
-	tp.green = green
-	tp.blue = blue
-	tp.octarine = octarine
-	tp.hashMSBs = hashMSBs
+
+	// An interface providing values a bit like the arrays we had before
+	tp.chain = chain
+
 	return tp
 }
 
