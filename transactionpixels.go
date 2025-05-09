@@ -688,16 +688,34 @@ func (tp *transactionPixels) drawTransactionRecurse(transaction chainreadinterfa
 				if err != nil {
 					panic(err)
 				}
+				if txoHandle.ParentSpecified() {
+					parentTransHandle := txoHandle.ParentTrans()
+					parentTrans, err := tp.chain.Blockchain().TransInterface(parentTransHandle)
+					if err != nil {
+						panic(err)
+					}
+					txs = append(txs, parentTrans)
+				} else if txoHandle.TxoHeightSpecified() {
+					parentTransHeight, err := tp.chain.Parents().ParentTransOfTxo(txoHandle.TxoHeight())
+					if err != nil {
+						panic(err)
+					}
+					parentTransHandle, err := tp.chain.HandleCreator().TransactionHandleByHeight(parentTransHeight)
+					if err != nil {
+						panic(err)
+					}
+					parentTrans, err := tp.chain.Blockchain().TransInterface(parentTransHandle)
+					if err != nil {
+						panic(err)
+					}
+					txs = append(txs, parentTrans)
+				} else {
+					panic("txo has neither parent transaction nor txo height specified")
+				}
 				txo, err := tp.chain.Blockchain().TxoInterface(txoHandle)
 				if err != nil {
 					panic(err)
 				}
-				parentTransHandle := txo.ParentTrans()
-				parentTrans, err := tp.chain.Blockchain().TransInterface(parentTransHandle)
-				if err != nil {
-					panic(err)
-				}
-				txs = append(txs, parentTrans)
 				// Get the bitcoin value of the txo (in satoshis)
 				sat, err := txo.Satoshis()
 				if err != nil {
