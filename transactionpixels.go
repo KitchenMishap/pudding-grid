@@ -153,8 +153,8 @@ func NewTransactionPixels(rootTransactionIndex int64, chain blockchain.AccessCha
 		}
 	}
 	tp.doneThreshold = 254.0 / 255.0
-	tp.maxDepth = 760000 // Silly but let's see!
-	tp.minDepth = 1      // minDepth overrides areaThreshold
+	tp.maxDepth = 16
+	tp.minDepth = 1 // minDepth overrides areaThreshold
 	tp.minContribution = 0.0
 	tp.areaThreshold = 0.5
 	tp.maxContributions = 30
@@ -191,9 +191,9 @@ func (tp *transactionPixels) setPixelCompleted(x int, y int, r byte, g byte, b b
 	tp.completedPixels[y][x][3] = o
 	tp.partialPixels[y][x] = nil
 	tp.incompletePixels--
-	if tp.incompletePixels%10000 == 0 {
+	if tp.incompletePixels%1000 == 0 {
 		percentPoints := int(100 * (tp.width*tp.height - tp.incompletePixels) / (tp.width * tp.height))
-		println(tp.incompletePixels, " ", percentPoints, " %")
+		println(tp.incompletePixels, " ", percentPoints, " %", tp.maxGoroutines-tp.goroutines, " goroutines")
 	}
 	if tp.incompletePixels == 0 {
 		println("Last pixel done")
