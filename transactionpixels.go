@@ -153,7 +153,7 @@ func NewTransactionPixels(rootTransactionIndex int64, chain blockchain.AccessCha
 		}
 	}
 	tp.doneThreshold = 254.0 / 255.0
-	tp.maxDepth = 16
+	tp.maxDepth = 32
 	tp.minDepth = 1 // minDepth overrides areaThreshold
 	tp.minContribution = 0.0
 	tp.areaThreshold = 0.5
