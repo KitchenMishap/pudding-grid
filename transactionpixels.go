@@ -158,7 +158,7 @@ func NewTransactionPixels(rootTransactionIndex int64, chain blockchain.AccessCha
 	tp.minContribution = 0.0
 	tp.areaThreshold = 0.5
 	tp.maxContributions = 30
-	tp.maxGoroutines = 10
+	tp.maxGoroutines = 40
 	tp.goroutines = tp.maxGoroutines
 
 	// An interface providing values a bit like the arrays we had before
@@ -216,12 +216,12 @@ func (tp *transactionPixels) contributeColour(x int, y int, proportion floatCoor
 	if proportion < tp.minContribution {
 		return false
 	}
+	tp.pixelMutexes[y][x].Lock()
+	defer tp.pixelMutexes[y][x].Unlock()
 	if tp.partialPixels[y][x] == nil {
 		// Already completed pixel
 		return false
 	}
-	tp.pixelMutexes[y][x].Lock()
-	defer tp.pixelMutexes[y][x].Unlock()
 
 	if proportion > tp.doneThreshold {
 		return tp.setPixelCompleted(x, y, byte(r), byte(g), byte(b), byte(o))
@@ -421,7 +421,7 @@ func (tp *transactionPixels) drawTransactionPixels(transaction chainreadinterfac
 // The names U,V are used for "sense co-ords", and either equal (X,Y) or (Y,X). U spans across transaction banding profile, V spans across transaction inputs.
 func (tp *transactionPixels) drawTransactionRecurse(transaction chainreadinterface.ITransaction, addressHashMSBs uint32, useUnitSquare bool, leftX floatCoords, rightX floatCoords, topY floatCoords, bottomY floatCoords, depth int, insistOneLastDepth bool, isFirstTxi bool, isLastTxi bool) bool {
 	// transaction can be nil if we are a UTXO and we have reversed time
-	const REVERSE_TIME = false
+	const REVERSE_TIME = true
 	useUnitSquare = false
 	// splitter := SplitRectSlabs{}
 	splitter := SquarifySplitter{}
@@ -735,7 +735,7 @@ func (tp *transactionPixels) drawTransactionRecurse(transaction chainreadinterfa
 				addrHashMSBs = append(addrHashMSBs, tp.chain.GetAddressHashMSBs(addr))
 			}
 			subRects = splitter.SplitRectIntoWeightedRects(thisRect, weights, depth, useUnitSquare)
-		} else {
+		} else { // reversed time
 			count, err := transaction.TxoCount()
 			if err != nil {
 				panic(err)
@@ -768,23 +768,34 @@ func (tp *transactionPixels) drawTransactionRecurse(transaction chainreadinterfa
 				addrHashMSBs = append(addrHashMSBs, tp.chain.GetAddressHashMSBs(addr))
 				// Get the transaction the output goes to
 				txiHandle := tp.chain.GetTxoSpentTxi(txoHandle)
-				if !txiHandle.TxiHeightSpecified() {
-					panic("txi height not specified")
+				if txiHandle == nil {
+					// The txo is unspent (in which case we have addrHashMSBs to make a colour from)
+					txs = append(txs, nil)
+				} else if txiHandle.ParentSpecified() {
+					parentTransHandle := txiHandle.ParentTrans()
+					parentTrans, err := tp.chain.Blockchain().TransInterface(parentTransHandle)
+					if err != nil {
+						panic(err)
+					}
+					txs = append(txs, parentTrans)
+				} else if txiHandle.TxiHeightSpecified() {
+					txiHeight := txiHandle.TxiHeight()
+					parentTransHeight, err := tp.chain.Parents().ParentTransOfTxi(txiHeight)
+					if err != nil {
+						panic(err)
+					}
+					parentTransHandle, err := tp.chain.HandleCreator().TransactionHandleByHeight(parentTransHeight)
+					if err != nil {
+						panic(err)
+					}
+					parentTrans, err := tp.chain.Blockchain().TransInterface(parentTransHandle)
+					if err != nil {
+						panic(err)
+					}
+					txs = append(txs, parentTrans)
+				} else {
+					panic("txi exists but neither parent nor txi height specified")
 				}
-				txiHeight := txiHandle.TxiHeight()
-				parentTransHeight, err := tp.chain.Parents().ParentTransOfTxi(txiHeight)
-				if err != nil {
-					panic(err)
-				}
-				parentTransHandle, err := tp.chain.HandleCreator().TransactionHandleByHeight(parentTransHeight)
-				if err != nil {
-					panic(err)
-				}
-				parentTrans, err := tp.chain.Blockchain().TransInterface(parentTransHandle)
-				if err != nil {
-					panic(err)
-				}
-				txs = append(txs, parentTrans)
 			}
 			subRects = splitter.SplitRectIntoWeightedRects(thisRect, weights, depth, useUnitSquare)
 		}
