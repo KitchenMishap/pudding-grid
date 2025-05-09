@@ -429,7 +429,11 @@ func (tp *transactionPixels) drawTransactionRecurse(transaction chainreadinterfa
 	finished := false
 	// Gather / calculate some things...
 
-	var hashMSBs uint32 // Either the (MSBs of the) hash of the transaction, or the hash of a utxo's address
+	// Either the (MSBs of the) hash of the transaction, (or replace with the hash of a utxo's address a bit later)
+	var hashMSBs uint32
+	if transaction != nil {
+		hashMSBs = tp.chain.GetHashMSBs(transaction)
+	}
 
 	// Is T a block reward? (no txis)
 	var isBlockReward bool
@@ -439,7 +443,6 @@ func (tp *transactionPixels) drawTransactionRecurse(transaction chainreadinterfa
 			panic(err)
 		}
 		isBlockReward = (txiCount == 0)
-		hashMSBs = tp.chain.GetHashMSBs(transaction)
 	} else {
 		// Is T a UTXO?
 		isBlockReward = (transaction == nil)
