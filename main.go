@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"pudding-grid/blockchain"
+	"github.com/KitchenMishap/pudding-grid/blockchain"
 )
 
 const TransactionIndex = 62417 // Transaction index to draw" (Pizza transaction)

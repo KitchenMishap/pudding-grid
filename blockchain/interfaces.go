@@ -10,4 +10,6 @@ type AccessChain interface {
 	HandleCreator() chainreadinterface.IHandleCreator
 	Parents() chainstorage.IParents
 	GetHashMSBs(handle chainreadinterface.ITransHandle) uint32
+	GetAddressHashMSBs(handle chainreadinterface.IAddressHandle) uint32
+	GetTxoSpentTxi(handle chainreadinterface.ITxoHandle) chainreadinterface.ITxiHandle
 }

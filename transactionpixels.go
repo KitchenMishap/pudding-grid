@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"errors"
+	"github.com/KitchenMishap/pudding-grid/blockchain"
 	"github.com/KitchenMishap/pudding-shed/chainreadinterface"
 	"math"
 	"os"
-	"pudding-grid/blockchain"
 	"sort"
 	"strconv"
 	"sync"
@@ -15,15 +18,16 @@ type floatColour = float32 // A float type to use for colour components
 
 // Represents the operation of constructing a pixel image from a transaction
 type transactionPixels struct {
+	rootTransactionIndex int64
 	// Pixels
 	width  int
 	height int
 	// The transaction is treated as the unit square
 	// The pixel grid maps to the following transaction rectangle relative to the unit square
-	left   floatCoords
-	right  floatCoords
-	top    floatCoords
-	bottom floatCoords
+	leftX   floatCoords
+	rightX  floatCoords
+	topY    floatCoords
+	bottomY floatCoords
 	// Each pixel holds dynamic information as its colour is accumulated
 	// Each is nil once completely dealt with
 	partialPixels [][]*transPixel
@@ -35,6 +39,10 @@ type transactionPixels struct {
 	doneThreshold floatCoords
 	// How deep do we want to go?
 	maxDepth int
+	// minDepth overrides areaThreshold
+	minDepth int
+	// Discard tiny tiny contributions to pixels
+	minContribution floatCoords
 	// How deep (area) do we want to go?
 	areaThreshold floatCoords
 	// How many contributions to a pixel before we collapse them?
@@ -61,10 +69,18 @@ type transPixel struct {
 }
 
 func createTransactionImage(transHandle chainreadinterface.ITransHandle, chain blockchain.AccessChain) error {
+	if !transHandle.HeightSpecified() {
+		return errors.New("handle doesn't specify height")
+	}
+	transHeight := transHandle.Height()
+	transaction, err := chain.Blockchain().TransInterface(transHandle)
+	if err != nil {
+		return err
+	}
 	//for zoom := 1; zoom <= 1048576*1048576; zoom *= 4 {
 	for zoom := 1; zoom <= 1; zoom *= 4 {
-		tp := NewTransactionPixels(chain, floatCoords(zoom))
-		tp.drawTransactionPixels(transHandle)
+		tp := NewTransactionPixels(transHeight, chain, floatCoords(zoom))
+		tp.drawTransactionPixels(transaction)
 		err := tp.outputGraphicsFile(zoom)
 		if err != nil {
 			return err
@@ -74,8 +90,9 @@ func createTransactionImage(transHandle chainreadinterface.ITransHandle, chain b
 	return nil
 }
 
-func NewTransactionPixels(chain blockchain.AccessChain, zoom floatCoords) *transactionPixels {
+func NewTransactionPixels(rootTransactionIndex int64, chain blockchain.AccessChain, zoom floatCoords) *transactionPixels {
 	tp := new(transactionPixels)
+	tp.rootTransactionIndex = rootTransactionIndex
 	tp.width = 1000
 	tp.height = 1000
 	//tp.width = 1920 // Full HD
@@ -84,6 +101,8 @@ func NewTransactionPixels(chain blockchain.AccessChain, zoom floatCoords) *trans
 	//tp.height = 1440
 	//tp.width = 4950 // A3 300 DPI
 	//tp.height = 3510
+	//tp.width = 5905 // 50cm x 50cm 300 dpi
+	//tp.height = 5905
 	//tp.width = 2882 // Marinas block
 	//tp.height = 2882
 	//tp.width = 2953 // Marinas shelf
@@ -98,10 +117,10 @@ func NewTransactionPixels(chain blockchain.AccessChain, zoom floatCoords) *trans
 	//tp.height = 8072
 	//tp.width = 7141 // Nigels fifth BTC
 	//tp.height = 7141
-	tp.left = 0.5 - 0.5/zoom
-	tp.right = 0.5 + 0.5/zoom
-	tp.top = 0.5 - 0.5/zoom
-	tp.bottom = 0.5 + 0.5/zoom
+	tp.leftX = 0.5 - 0.5/zoom
+	tp.rightX = 0.5 + 0.5/zoom
+	tp.topY = 0.5 - 0.5/zoom
+	tp.bottomY = 0.5 + 0.5/zoom
 	tp.incompletePixels = tp.width * tp.height
 	// 2D slice of slices
 	tp.partialPixels = make([][]*transPixel, tp.height)
@@ -133,11 +152,13 @@ func NewTransactionPixels(chain blockchain.AccessChain, zoom floatCoords) *trans
 			tp.completedPixels[y][x][3] = 0
 		}
 	}
-	tp.doneThreshold = 255.0 / 256.0
-	tp.maxDepth = 700000
+	tp.doneThreshold = 254.0 / 255.0
+	tp.maxDepth = 760000 // Silly but let's see!
+	tp.minDepth = 1      // minDepth overrides areaThreshold
+	tp.minContribution = 0.0
 	tp.areaThreshold = 0.5
 	tp.maxContributions = 30
-	tp.maxGoroutines = 2
+	tp.maxGoroutines = 10
 	tp.goroutines = tp.maxGoroutines
 
 	// An interface providing values a bit like the arrays we had before
@@ -186,8 +207,14 @@ func (tp *transactionPixels) contributeColour(x int, y int, proportion floatCoor
 	if x >= tp.width || y >= tp.height {
 		panic("Pixel co-ords out of range")
 	}
+	if proportion == 0 {
+		return false
+	}
 	if proportion <= 0 {
 		panic("Non positive proportion")
+	}
+	if proportion < tp.minContribution {
+		return false
 	}
 	if tp.partialPixels[y][x] == nil {
 		// Already completed pixel
@@ -221,6 +248,27 @@ func (tp *transactionPixels) contributeColour(x int, y int, proportion floatCoor
 		return false
 	} else {
 		return false
+	}
+}
+
+func (tp *transactionPixels) replaceColour(x int, y int, r byte, g byte, b byte, o byte) {
+	if tp.partialPixels[y][x] == nil {
+		// Pixel is completed, amend it there
+		tp.completedPixels[y][x][0] = r
+		tp.completedPixels[y][x][1] = g
+		tp.completedPixels[y][x][2] = b
+		tp.completedPixels[y][x][3] = o
+	} else {
+		_, _, _, _, aa := tp.summmarizePixel(x, y)
+		tp.partialPixels[y][x].redAccumulations = []floatColour{floatColour(r)}
+		tp.partialPixels[y][x].greenAccumulations = []floatColour{floatColour(g)}
+		tp.partialPixels[y][x].blueAccumulations = []floatColour{floatColour(b)}
+		tp.partialPixels[y][x].octarineAccumulations = []floatColour{floatColour(o)}
+		tp.partialPixels[y][x].areaAccumulations = []floatCoords{aa}
+		if tp.partialPixels[y][x].areaEstimate >= tp.doneThreshold {
+			rr, gg, bb, oo, aa := tp.summmarizePixel(x, y)
+			tp.setPixelCompleted(x, y, byte(float64(rr)/float64(aa)), byte(float64(gg)/float64(aa)), byte(float64(bb)/float64(aa)), byte(float64(oo)/float64(aa)))
+		}
 	}
 }
 
@@ -313,24 +361,24 @@ func overlapArea(left1 floatCoords, right1 floatCoords, top1 floatCoords, bottom
 }
 
 func (tp *transactionPixels) pixelToTransactionCoords(x int, y int) (left floatCoords, right floatCoords, top floatCoords, bottom floatCoords) {
-	xScale := (tp.right - tp.left) / floatCoords(tp.width)
-	yScale := (tp.bottom - tp.top) / floatCoords(tp.height)
-	left = tp.left + floatCoords(x)*xScale
+	xScale := (tp.rightX - tp.leftX) / floatCoords(tp.width)
+	yScale := (tp.bottomY - tp.topY) / floatCoords(tp.height)
+	left = tp.leftX + floatCoords(x)*xScale
 	right = left + xScale
-	top = tp.top + floatCoords(y)*yScale
+	top = tp.topY + floatCoords(y)*yScale
 	bottom = top + yScale
 	return left, right, top, bottom
 }
 
 func (tp *transactionPixels) transactionToPixelCoords(x floatCoords, y floatCoords) (px floatCoords, py floatCoords) {
-	xScale := (tp.right - tp.left) / floatCoords(tp.width)
-	yScale := (tp.bottom - tp.top) / floatCoords(tp.height)
-	px = (x - tp.left) / xScale
-	py = (y - tp.top) / yScale
+	xScale := (tp.rightX - tp.leftX) / floatCoords(tp.width)
+	yScale := (tp.bottomY - tp.topY) / floatCoords(tp.height)
+	px = (x - tp.leftX) / xScale
+	py = (y - tp.topY) / yScale
 	return px, py
 }
 
-func (tp *transactionPixels) drawTransactionPixels(transHandle chainreadinterface.ITransHandle) {
+func (tp *transactionPixels) drawTransactionPixels(transaction chainreadinterface.ITransaction) {
 	println("Starting")
 	finished := false
 	// First mark pixels outside transaction as black
@@ -359,13 +407,7 @@ func (tp *transactionPixels) drawTransactionPixels(transHandle chainreadinterfac
 
 	// Second, delegate the transaction to the recursive function to
 	// find the colours within the transaction
-	// (Find the overall taint first)
-	hashMSB := tp.chain.GetHashMSBs(transHandle)
-	tr := byte((hashMSB & 0xFF000000) >> 24)
-	tg := byte((hashMSB & 0x00FF0000) >> 16)
-	tb := byte((hashMSB & 0x0000FF00) >> 8)
-	to := byte((hashMSB & 0x000000FF))
-	finished = finished || tp.drawTransactionRecurse(transHandle, 0.0, 1.0, 0.0, 1.0, true, 0, false, tr, tg, tb, to, 0.00)
+	finished = finished || tp.drawTransactionRecurse(transaction, 0, false, 0.0, 1.0, 0.0, 1.0, 0, true, true, true)
 	if finished {
 		println("Properly finished")
 	} else {
@@ -375,37 +417,44 @@ func (tp *transactionPixels) drawTransactionPixels(transHandle chainreadinterfac
 }
 
 // Returns true if finished overall
-func (tp *transactionPixels) drawTransactionRecurse(transHandle chainreadinterface.ITransHandle, left floatCoords, right floatCoords, top floatCoords, bottom floatCoords, xInsteadOfY bool, depth int, insistOneLastDepth bool, taintR byte, taintG byte, taintB byte, taintO byte, proportionTaint float64) bool {
-	finished := false
+// The names X,Y are used for "image co-ords" which go from 0 to 1 across the whole image
+// The names U,V are used for "sense co-ords", and either equal (X,Y) or (Y,X). U spans across transaction banding profile, V spans across transaction inputs.
+func (tp *transactionPixels) drawTransactionRecurse(transaction chainreadinterface.ITransaction, addressHashMSBs uint32, useUnitSquare bool, leftX floatCoords, rightX floatCoords, topY floatCoords, bottomY floatCoords, depth int, insistOneLastDepth bool, isFirstTxi bool, isLastTxi bool) bool {
+	// transaction can be nil if we are a UTXO and we have reversed time
+	const REVERSE_TIME = false
+	useUnitSquare = false
+	// splitter := SplitRectSlabs{}
+	splitter := SquarifySplitter{}
 
+	finished := false
 	// Gather / calculate some things...
-	trans, err := tp.chain.Blockchain().TransInterface(transHandle)
-	if err != nil {
-		panic(err)
-	}
-	hashMSBs := tp.chain.GetHashMSBs(transHandle)
+
+	var hashMSBs uint32 // Either the (MSBs of the) hash of the transaction, or the hash of a utxo's address
 
 	// Is T a block reward? (no txis)
-	txiCount, err := trans.TxiCount()
-	if err != nil {
-		panic(err)
+	var isBlockReward bool
+	if !REVERSE_TIME {
+		txiCount, err := transaction.TxiCount()
+		if err != nil {
+			panic(err)
+		}
+		isBlockReward = (txiCount == 0)
+		hashMSBs = tp.chain.GetHashMSBs(transaction)
+	} else {
+		// Is T a UTXO?
+		isBlockReward = (transaction == nil)
+		if isBlockReward {
+			hashMSBs = addressHashMSBs // Use the hash of the txo's address instead
+		}
 	}
-	isBlockReward := (txiCount == 0)
-
-	// Work out the taint that the tx itself applies to its children
-	tr := byte((hashMSBs & 0xFF000000) >> 24)
-	tg := byte((hashMSBs & 0x00FF0000) >> 16)
-	tb := byte((hashMSBs & 0x0000FF00) >> 8)
-	to := byte((hashMSBs & 0x000000FF))
-
 	// The average colour of the transaction before we recurse to higher detail and before we apply the taint.
 	// We no longer generate a transaction colour database, as it quickly mushes to grey anyway.
 	// Nowadays, to save time, the colour is taken from the transaction hash as before, but if (as in most cases)
 	// the transaction has inputs, its assumed to be "mixed" into grey immediately, without true mixing
-	r := tr
-	g := tg
-	b := tb
-	o := to
+	r := byte((hashMSBs & 0xFF000000) >> 24)
+	g := byte((hashMSBs & 0x00FF0000) >> 16)
+	b := byte((hashMSBs & 0x0000FF00) >> 8)
+	o := byte(hashMSBs & 0x000000FF)
 	if !isBlockReward {
 		r = 128
 		g = 128
@@ -413,61 +462,40 @@ func (tp *transactionPixels) drawTransactionRecurse(transHandle chainreadinterfa
 		o = 128
 	}
 
-	// Apply the taint from the level above
-	// These numbers are only used if we don't recurse to the next level
-	r, g, b, o = taintPixel(r, g, b, o, taintR, taintG, taintB, taintO, proportionTaint)
-
-	// And the taint amount. Scale the taint amount by the octarine to give various alphas
-	//ta := 0.15 * float64(to) / 255.0
-
-	ta := 0.00
-	// Only apply the taint if there are more than one inputs to the transaction
-	// #artisticlicense This avoids an image being "Broadly all one colour"
-	skipTaint := (txiCount == 1)
-
-	// Adjust the taint amount
-	nextProportionTaint := proportionTaint + (1-proportionTaint)*ta
-	if skipTaint {
-		nextProportionTaint = proportionTaint
-	} else {
-		// Don't forget to taint the input taint!
-		taintR, taintG, taintB, taintO = taintPixel(tr, tg, tb, to, taintR, taintG, taintB, taintO, proportionTaint)
-	}
-
 	// We need to get the intersection of the image and T
 	// We check whether there IS any intersection initially
-	if tp.left >= right {
+	if tp.leftX >= rightX {
 		return false // Image is wholly to right of transaction
 	}
-	if tp.right <= left {
+	if tp.rightX <= leftX {
 		return false // image is wholly to left of transaction
 	}
-	if tp.top >= bottom {
+	if tp.topY >= bottomY {
 		return false // image is wholly below transaction
 	}
-	if tp.bottom <= top {
+	if tp.bottomY <= topY {
 		return false // image is wholly above transaction
 	}
 	// Start by presuming the intersection IS the image, then clip it to the transaction
-	interLeft := tp.left
-	interRight := tp.right
-	interTop := tp.top
-	interBottom := tp.bottom
-	if interLeft < left {
-		interLeft = left
+	interLeftX := tp.leftX
+	interRightX := tp.rightX
+	interTopY := tp.topY
+	interBottomY := tp.bottomY
+	if interLeftX < leftX {
+		interLeftX = leftX
 	}
-	if interRight > right {
-		interRight = right
+	if interRightX > rightX {
+		interRightX = rightX
 	}
-	if interTop < top {
-		interTop = top
+	if interTopY < topY {
+		interTopY = topY
 	}
-	if interBottom > bottom {
-		interBottom = bottom
+	if interBottomY > bottomY {
+		interBottomY = bottomY
 	}
 	// Now we convert from transaction co-ordinates to pixel co-ordinates (as floats)
-	pixLeft, pixTop := tp.transactionToPixelCoords(interLeft, interTop)
-	pixRight, pixBottom := tp.transactionToPixelCoords(interRight, interBottom)
+	pixLeft, pixTop := tp.transactionToPixelCoords(interLeftX, interTopY)
+	pixRight, pixBottom := tp.transactionToPixelCoords(interRightX, interBottomY)
 	// If we have a zero area rectangle we can't expect progress!
 	if pixLeft == pixRight || pixTop == pixBottom {
 		return false
@@ -478,12 +506,10 @@ func (tp *transactionPixels) drawTransactionRecurse(transHandle chainreadinterfa
 	pixRightAffected := int(math.Floor(float64(pixRight)))
 	pixBottomAffected := int(math.Floor(float64(pixBottom)))
 
-	// Z is the direction (x or y) that we're splitting the transaction along
-	// zLength is the length of the transaction, in pixels, along that direction x or y
 	// The following vals will help us decide whether to go deeper
 	width := pixRight - pixLeft
 	height := pixBottom - pixTop
-	letsGoDeeper := width*height > tp.areaThreshold
+	letsGoDeeper := width*height > tp.areaThreshold || depth < tp.minDepth
 	oneLastDepthWorthwhile := false
 
 	var goDeeper bool
@@ -571,115 +597,208 @@ func (tp *transactionPixels) drawTransactionRecurse(transHandle chainreadinterfa
 		// Recurse txi's of T
 		// First add up the bitcoin values of inputs so we know the ratios
 		total := int64(0)
-		count, err := trans.TxiCount()
-		if err != nil {
-			panic(err)
-		}
-		for txiInd := int64(0); txiInd < count; txiInd++ {
-			txiHandle, err := trans.NthTxi(txiInd)
+		var sats int64
+		if !REVERSE_TIME {
+			count, err := transaction.TxiCount()
 			if err != nil {
 				panic(err)
 			}
-			txi, err := tp.chain.Blockchain().TxiInterface(txiHandle)
-			if err != nil {
-				panic(err)
+			for txiInd := int64(0); txiInd < count; txiInd++ {
+				txiHandle, err := transaction.NthTxi(txiInd)
+				if err != nil {
+					panic(err)
+				}
+				txi, err := tp.chain.Blockchain().TxiInterface(txiHandle)
+				if err != nil {
+					panic(err)
+				}
+				// Get the txo corresponding to the txi
+				txoHandle, err := txi.SourceTxo()
+				txo, err := tp.chain.Blockchain().TxoInterface(txoHandle)
+				if err != nil {
+					panic(err)
+				}
+				// Get the bitcoin value of the txo (in satoshis)
+				sats, err = txo.Satoshis()
+				if err != nil {
+					panic(err)
+				}
+				total += sats
 			}
-			// Get the txo corresponding to the txi
-			txoHandle, err := txi.SourceTxo()
-			txo, err := tp.chain.Blockchain().TxoInterface(txoHandle)
-			if err != nil {
-				panic(err)
+		} else {
+			var count int64
+			var err error
+			if transaction == nil {
+				count = 0
+			} else {
+				count, err = transaction.TxoCount()
+				if err != nil {
+					panic(err)
+				}
+				for txoInd := int64(0); txoInd < count; txoInd++ {
+					txoHandle, err := transaction.NthTxo(txoInd)
+					if err != nil {
+						panic(err)
+					}
+					txo, err := tp.chain.Blockchain().TxoInterface(txoHandle)
+					if err != nil {
+						panic(err)
+					}
+					// Get the bitcoin value of the txo (in satoshis)
+					sats, err := txo.Satoshis()
+					if err != nil {
+						panic(err)
+					}
+					total += sats
+				}
 			}
-			// Get the bitcoin value of the txo (in satoshis)
-			sats, err := txo.Satoshis()
-			if err != nil {
-				panic(err)
-			}
-			total += sats
 		}
 		// Now recurse
-		// z is "either" x or y
-		var prevZ floatCoords
-		if xInsteadOfY {
-			prevZ = left
-		} else {
-			prevZ = top
-		}
 		satSum := uint64(0) // The satoshis we have encountered so far
 
 		// We want to do the biggest input first, as it is more likely to complete
 		// some pixels (and that will mean others might not need to be examined in depth).
 		// So gather the info we need about the inputs into arrays before we start with biggest.
-		var txs []chainreadinterface.ITransHandle
-		var sats []uint64
-		var zstarts []floatCoords
-		var zends []floatCoords
+		var txs []chainreadinterface.ITransaction
+		var addrHashMSBs []uint32
+		var sats2 []int64
+		var weights []floatCoords // = sats2
+		var subRects []rect
 		var dones []bool
-		for txiInd := int64(0); txiInd < count; txiInd++ {
-			txiHandle, err := trans.NthTxi(txiInd)
+		var isFirstTxi []bool
+		var isLastTxi []bool
+		var txxIndex []uint64
+		thisRect := rect{left: leftX, right: rightX, top: topY, bottom: bottomY}
+		if !REVERSE_TIME {
+			count, err := transaction.TxiCount()
 			if err != nil {
 				panic(err)
 			}
-			txi, err := tp.chain.Blockchain().TxiInterface(txiHandle)
-			if err != nil {
-				panic(err)
-			}
-			// Get the transaction the input came from
-			txoHandle, err := txi.SourceTxo()
-			txo, err := tp.chain.Blockchain().TxoInterface(txoHandle)
-			if err != nil {
-				panic(err)
-			}
-			// Get the bitcoin value of the txo (in satoshis)
-			sat, err := txo.Satoshis()
-			if err != nil {
-				panic(err)
-			}
-			txHandle := txo.ParentTrans()
-			if !txo.ParentSpecified() {
-				if !txo.TxoHeightSpecified() {
-					panic("how am I supposed to find the transaction then?")
-				}
-				t, err := tp.chain.Parents().ParentTransOfTxo(txo.TxoHeight())
+			for txiInd := int64(0); txiInd < count; txiInd++ {
+				txiHandle, err := transaction.NthTxi(txiInd)
 				if err != nil {
 					panic(err)
 				}
-				txHandle, err = tp.chain.HandleCreator().TransactionHandleByHeight(t)
+				txi, err := tp.chain.Blockchain().TxiInterface(txiHandle)
 				if err != nil {
 					panic(err)
 				}
+				// Get the txo the txi came from
+				txoHandle, err := txi.SourceTxo()
+				if err != nil {
+					panic(err)
+				}
+				txo, err := tp.chain.Blockchain().TxoInterface(txoHandle)
+				if err != nil {
+					panic(err)
+				}
+				parentTransHandle := txo.ParentTrans()
+				parentTrans, err := tp.chain.Blockchain().TransInterface(parentTransHandle)
+				if err != nil {
+					panic(err)
+				}
+				txs = append(txs, parentTrans)
+				// Get the bitcoin value of the txo (in satoshis)
+				sat, err := txo.Satoshis()
+				if err != nil {
+					panic(err)
+				}
+				sats2 = append(sats2, sat)
+				weights = append(weights, floatCoords(sat))
+				satSum += uint64(sat)
+				dones = append(dones, false)
+				isFirstTxi = append(isFirstTxi, txiInd == 0)
+				isLastTxi = append(isLastTxi, txiInd == count-1)
+				txxIndex = append(txxIndex, uint64(txiInd))
+				addr, err := txo.Address()
+				if err != nil {
+					panic(err)
+				}
+				addrHashMSBs = append(addrHashMSBs, tp.chain.GetAddressHashMSBs(addr))
 			}
-
-			txs = append(txs, txHandle)
-			sats = append(sats, uint64(sat))
-			satSum += uint64(sat)
-
-			var z floatCoords
-			if xInsteadOfY {
-				z = left + (floatCoords(satSum)/floatCoords(total))*(right-left)
-			} else {
-				z = top + (floatCoords(satSum)/floatCoords(total))*(bottom-top)
+			subRects = splitter.SplitRectIntoWeightedRects(thisRect, weights, depth, useUnitSquare)
+		} else {
+			count, err := transaction.TxoCount()
+			if err != nil {
+				panic(err)
 			}
-			zstarts = append(zstarts, prevZ)
-			zends = append(zends, z)
-			prevZ = z
-			dones = append(dones, false)
+			for txoInd := int64(0); txoInd < count; txoInd++ {
+				txoHandle, err := transaction.NthTxo(txoInd)
+				if err != nil {
+					panic(err)
+				}
+				txo, err := tp.chain.Blockchain().TxoInterface(txoHandle)
+				if err != nil {
+					panic(err)
+				}
+				// Get the bitcoin value of the txo (in satoshis)
+				sat, err := txo.Satoshis()
+				if err != nil {
+					panic(err)
+				}
+				sats2 = append(sats2, sat)
+				weights = append(weights, floatCoords(sat))
+				satSum += uint64(sat)
+				dones = append(dones, false)
+				isFirstTxi = append(isFirstTxi, txoInd == 0)
+				isLastTxi = append(isLastTxi, txoInd == count-1)
+				txxIndex = append(txxIndex, uint64(txoInd))
+				addr, err := txo.Address()
+				if err != nil {
+					panic(err)
+				}
+				addrHashMSBs = append(addrHashMSBs, tp.chain.GetAddressHashMSBs(addr))
+				// Get the transaction the output goes to
+				txiHandle := tp.chain.GetTxoSpentTxi(txoHandle)
+				if !txiHandle.TxiHeightSpecified() {
+					panic("txi height not specified")
+				}
+				txiHeight := txiHandle.TxiHeight()
+				parentTransHeight, err := tp.chain.Parents().ParentTransOfTxi(txiHeight)
+				if err != nil {
+					panic(err)
+				}
+				parentTransHandle, err := tp.chain.HandleCreator().TransactionHandleByHeight(parentTransHeight)
+				if err != nil {
+					panic(err)
+				}
+				parentTrans, err := tp.chain.Blockchain().TransInterface(parentTransHandle)
+				if err != nil {
+					panic(err)
+				}
+				txs = append(txs, parentTrans)
+			}
+			subRects = splitter.SplitRectIntoWeightedRects(thisRect, weights, depth, useUnitSquare)
 		}
+
+		// Decide whether there's a mixture of orientations at this level
+		horizontal := int(0)
+		vertical := int(0)
+		for _, rectCopy := range subRects {
+			if rectCopy.right-rectCopy.left > rectCopy.bottom-rectCopy.top {
+				horizontal++
+			} else {
+				vertical++
+			}
+		}
+		//allSameWayUp := (horizontal*vertical == 0)
+
 		// Now recurse, biggest first, until all dones are true
 		// Here is where we start thinking about multithreading using goroutines
 		var wg sync.WaitGroup
 		routines := 0
 
 		for {
-			biggestSats := uint64(0)
+			biggestSats := int64(0)
 			biggestIndex := -1
 			// Find the i with the biggest sats[i]
 			for i := 0; i < len(txs); i++ {
-				if !dones[i] && sats[i] > biggestSats {
-					biggestSats = sats[i]
+				if !dones[i] && sats2[i] > biggestSats {
+					biggestSats = sats2[i]
 					biggestIndex = i
 				}
 			}
+
 			// Do the i with the biggest sats[i]
 			if biggestSats > 0 {
 				if tp.requestGoroutine() {
@@ -687,26 +806,16 @@ func (tp *transactionPixels) drawTransactionRecurse(transHandle chainreadinterfa
 					wg.Add(1)
 					routines++
 					// Pay attention here! Running an anonymous function as a goroutine
-					if xInsteadOfY {
-						go func(_tx chainreadinterface.ITransHandle, _l floatCoords, _r floatCoords, _t floatCoords, _b floatCoords) {
-							defer wg.Done()
-							tp.drawTransactionRecurse(_tx, _l, _r, _t, _b, false, depth+1, oneLastDepthWorthwhile, taintR, taintG, taintB, taintO, nextProportionTaint)
-						}(txs[biggestIndex], zstarts[biggestIndex], zends[biggestIndex], top, bottom)
-					} else {
-						go func(_tx chainreadinterface.ITransHandle, _l floatCoords, _r floatCoords, _t floatCoords, _b floatCoords) {
-							defer wg.Done()
-							tp.drawTransactionRecurse(_tx, _l, _r, _t, _b, true, depth+1, oneLastDepthWorthwhile, taintR, taintG, taintB, taintO, nextProportionTaint)
-						}(txs[biggestIndex], left, right, zstarts[biggestIndex], zends[biggestIndex])
-					}
+					go func(_tx chainreadinterface.ITransaction, _msbs uint32, _rect rect, _isFirst bool, _isLast bool, txxIndex uint64) {
+						defer wg.Done()
+						tp.drawTransactionRecurse(_tx, _msbs, useUnitSquare, _rect.left, _rect.right, _rect.top, _rect.bottom, depth+1, oneLastDepthWorthwhile, _isFirst, _isLast)
+					}(txs[biggestIndex], addrHashMSBs[biggestIndex], subRects[biggestIndex], isFirstTxi[biggestIndex], isLastTxi[biggestIndex], txxIndex[biggestIndex])
 				} else {
 					// Recurse as standard in the current goroutine
 					// This could be because we are running in a single-threaded mode
 					// But COULD be multithreaded; we've just run out of goroutines
-					if xInsteadOfY {
-						finished = finished || tp.drawTransactionRecurse(txs[biggestIndex], zstarts[biggestIndex], zends[biggestIndex], top, bottom, false, depth+1, oneLastDepthWorthwhile, taintR, taintG, taintB, taintO, nextProportionTaint)
-					} else {
-						finished = finished || tp.drawTransactionRecurse(txs[biggestIndex], left, right, zstarts[biggestIndex], zends[biggestIndex], true, depth+1, oneLastDepthWorthwhile, taintR, taintG, taintB, taintO, nextProportionTaint)
-					}
+					finished = finished || tp.drawTransactionRecurse(txs[biggestIndex], addrHashMSBs[biggestIndex], useUnitSquare, subRects[biggestIndex].left, subRects[biggestIndex].right, subRects[biggestIndex].top, subRects[biggestIndex].bottom, depth+1, oneLastDepthWorthwhile, isFirstTxi[biggestIndex], isLastTxi[biggestIndex])
+
 					if finished {
 						return true
 					}
@@ -721,7 +830,302 @@ func (tp *transactionPixels) drawTransactionRecurse(transHandle chainreadinterfa
 		wg.Wait()
 		tp.releaseGoroutines(routines)
 	}
+
+	// Work out the taint colour that the tx itself paints over its children as transaction banding
+	transR := byte((hashMSBs & 0xFF000000) >> 24)
+	transG := byte((hashMSBs & 0x00FF0000) >> 16)
+	transB := byte((hashMSBs & 0x0000FF00) >> 8)
+	transO := byte((hashMSBs & 0x000000FF))
+
+	const HUE_AS_DATE = false
+	const STRIPE_COLOUR_IS_HASH = !HUE_AS_DATE
+	if HUE_AS_DATE {
+		transH, transS, transV := rgb_to_hsv(transR, transG, transB)
+		startH := transH // Deterministically choose a start hue, so not all pics same colour
+		var eraStart, eraEnd int64
+		if REVERSE_TIME {
+			eraStart = tp.rootTransactionIndex
+			eraEnd = 888888 // ToDo get this from somewhere
+		} else {
+			eraStart = 0
+			eraEnd = tp.rootTransactionIndex
+		}
+		if !transaction.HeightSpecified() {
+			panic(errors.New("transaction height not specified"))
+		}
+		transH = float64(transaction.Height()-eraStart) / float64(eraEnd-eraStart)
+		transH += startH             // Rotate hue by start hue
+		transH -= math.Floor(transH) // Keep between 0 and 1
+		transR, transG, transB = hsv2rgb(byte(255*transH), byte(255*transS), byte(255*transV))
+	}
+
+	// Next we "paint over" the transaction banding (a new form of tainting)...
+	// Much of this code is borrowed from above
+
+	// The top line of pixels, apart from corners, is (potentially) partially affected by the same amount,
+	// so calculate the precise overlap percentage
+	overlap := floatCoords(pixTopAffected+1) - pixTop
+	// Wash or banding paint to the top row (not including corners) by percentage overlap
+	if overlap > 0 {
+		for x := pixLeftAffected + 1; x <= pixRightAffected-1; x++ {
+			tp.ApplyTransactionBandingToPixel(x, pixTopAffected,
+				pixLeft, pixRight, pixTop, pixBottom, overlap,
+				transR, transG, transB, transO, isBlockReward, depth,
+				isFirstTxi, isLastTxi)
+		}
+	}
+	// Similarly for bottom row (not including corners)
+	overlap = pixBottom - floatCoords(pixBottomAffected)
+	if overlap > 0 {
+		for x := pixLeftAffected + 1; x <= pixRightAffected-1; x++ {
+			tp.ApplyTransactionBandingToPixel(x, pixBottomAffected,
+				pixLeft, pixRight, pixTop, pixBottom, overlap,
+				transR, transG, transB, transO, isBlockReward, depth,
+				isFirstTxi, isLastTxi)
+		}
+	}
+	// Similarly for left column (not including corners)
+	overlap = floatCoords(pixLeftAffected+1) - pixLeft
+	if overlap > 0 {
+		for y := pixTopAffected + 1; y <= pixBottomAffected-1; y++ {
+			tp.ApplyTransactionBandingToPixel(pixLeftAffected, y,
+				pixLeft, pixRight, pixTop, pixBottom, overlap,
+				transR, transG, transB, transO, isBlockReward, depth,
+				isFirstTxi, isLastTxi)
+		}
+	}
+	// Similarly for right column (not including corners)
+	overlap = pixRight - floatCoords(pixRightAffected)
+	if overlap > 0 {
+		for y := pixTopAffected + 1; y <= pixBottomAffected-1; y++ {
+			tp.ApplyTransactionBandingToPixel(pixRightAffected, y,
+				pixLeft, pixRight, pixTop, pixBottom, overlap,
+				transR, transG, transB, transO, isBlockReward, depth,
+				isFirstTxi, isLastTxi)
+		}
+	}
+	// Corners are a faff but are very much needed, because very small rectangles are very common!
+	// Of particular faff is that all four corners (or fewer) may be the same pixel :-O so only count once
+	leftEqualsRight := (pixLeftAffected == pixRightAffected)
+	topEqualsBottom := (pixTopAffected == pixBottomAffected)
+	overlapTL := overlapArea(pixLeft, pixRight, pixTop, pixBottom, floatCoords(pixLeftAffected), floatCoords(pixLeftAffected+1), floatCoords(pixTopAffected), floatCoords(pixTopAffected+1))
+	overlapTR := overlapArea(pixLeft, pixRight, pixTop, pixBottom, floatCoords(pixRightAffected), floatCoords(pixRightAffected+1), floatCoords(pixTopAffected), floatCoords(pixTopAffected+1))
+	overlapBL := overlapArea(pixLeft, pixRight, pixTop, pixBottom, floatCoords(pixLeftAffected), floatCoords(pixLeftAffected+1), floatCoords(pixBottomAffected), floatCoords(pixBottomAffected+1))
+	overlapBR := overlapArea(pixLeft, pixRight, pixTop, pixBottom, floatCoords(pixRightAffected), floatCoords(pixRightAffected+1), floatCoords(pixBottomAffected), floatCoords(pixBottomAffected+1))
+	// Top left
+	if overlapTL > 0 {
+		tp.ApplyTransactionBandingToPixel(pixLeftAffected, pixTopAffected,
+			pixLeft, pixRight, pixTop, pixBottom, overlapTL,
+			transR, transG, transB, transO, isBlockReward, depth,
+			isFirstTxi, isLastTxi)
+	}
+	// Maybe top right
+	if !leftEqualsRight && overlapTR > 0 {
+		tp.ApplyTransactionBandingToPixel(pixRightAffected, pixTopAffected,
+			pixLeft, pixRight, pixTop, pixBottom, overlapTR,
+			transR, transG, transB, transO, isBlockReward, depth,
+			isFirstTxi, isLastTxi)
+	}
+	// Maybe bottom left and / or right
+	if !topEqualsBottom {
+		if overlapBL > 0 {
+			tp.ApplyTransactionBandingToPixel(pixLeftAffected, pixBottomAffected,
+				pixLeft, pixRight, pixTop, pixBottom, overlapBL,
+				transR, transG, transB, transO, isBlockReward, depth,
+				isFirstTxi, isLastTxi)
+		}
+		if !leftEqualsRight && overlapBR > 0 {
+			tp.ApplyTransactionBandingToPixel(pixRightAffected, pixBottomAffected,
+				pixLeft, pixRight, pixTop, pixBottom, overlapBR,
+				transR, transG, transB, transO, isBlockReward, depth,
+				isFirstTxi, isLastTxi)
+		}
+	}
+
+	// The totally affected pixels in the middle (if any) are easy...
+	for x := pixLeftAffected + 1; x <= pixRightAffected-1; x++ {
+		for y := pixTopAffected + 1; y <= pixBottomAffected-1; y++ {
+			tp.ApplyTransactionBandingToPixel(x, y,
+				pixLeft, pixRight, pixTop, pixBottom, 1.0,
+				transR, transG, transB, transO, isBlockReward, depth,
+				isFirstTxi, isLastTxi)
+		}
+	}
+
 	return finished
+}
+
+func (tp *transactionPixels) ApplyTransactionBandingToPixel(x int, y int,
+	transLeft floatCoords, transRight floatCoords, transTop floatCoords, transBottom floatCoords, overlapAmount floatCoords,
+	transR byte, transG byte, transB byte, transO byte,
+	isBlockReward bool, depth int,
+	isFirstTxi bool, isLastTxi bool) {
+
+	// Skip transactions where there is only one txi
+	if isFirstTxi && isLastTxi {
+		return
+	}
+
+	tp.pixelMutexes[y][x].Lock()
+
+	u := floatCoords(x)
+	uStart := transLeft
+	uEnd := transRight
+	washProportion := transactionBandingProfile(u, uStart, uEnd, isFirstTxi, isLastTxi)
+
+	var newR, newG, newB, newO byte
+	var existingR, existingG, existingB, existingO byte
+	if tp.partialPixels[y][x] == nil {
+		// A complete pixel, get it from there
+		existingR = tp.completedPixels[y][x][0]
+		existingG = tp.completedPixels[y][x][1]
+		existingB = tp.completedPixels[y][x][2]
+		existingO = tp.completedPixels[y][x][3]
+	} else {
+		exR, exG, exB, exO, _ := tp.summmarizePixel(x, y)
+		existingR = byte(exR)
+		existingG = byte(exG)
+		existingB = byte(exB)
+		existingO = byte(exO)
+	}
+
+	const ADJUST_TOP_LEVEL = false
+	const GAP_IN_MIDDLE = true
+	const DIAGONAL_STUFF = true
+	if DIAGONAL_STUFF {
+		pixWidth := float64(transRight - transLeft)
+		pixHeight := float64(transBottom - transTop)
+		pixDivider := (pixWidth + pixHeight) / 2.0
+		pixMidX := float64(transLeft+transRight) / 2
+		pixMidY := float64(transTop+transBottom) / 2
+
+		// These are relative to the midpoint
+		// Create a set of 9 subpixels
+		xSubPixels := make([]float64, 9)
+		ySubPixels := make([]float64, 9)
+		counter := 0
+		for jj := -0.33; jj < 0.34; jj += 0.33 {
+			for ii := -0.33; ii < 0.34; ii += 0.33 {
+				xSubPixels[counter] = (float64(x) + ii - pixMidX) / pixDivider
+				ySubPixels[counter] = (float64(y) + jj - pixMidY) / pixDivider
+				counter++
+			}
+		}
+
+		// Rotate by 1/256 revolution per octarine digit
+		angle := float64(transO) * math.Pi * 2 / 256
+		sin := math.Sin(angle)
+		cos := math.Cos(angle)
+		for i := 0; i < 9; i++ {
+			xSubPixels[i], ySubPixels[i] = cos*xSubPixels[i]-sin*ySubPixels[i], sin*xSubPixels[i]+cos*ySubPixels[i]
+		}
+
+		stripes := 3.0 // Number of stripes that fit into average of edge width and height
+		if pixWidth > pixHeight {
+			if math.Abs(sin) > math.Sqrt(0.5) {
+				stripes += 2 // More stripes if wide transaction and horizontal stripes
+			}
+		} else {
+			if math.Abs(sin) < math.Sqrt(0.5) {
+				stripes += 2 // More stripes if tall transaction and vertical stripes
+			}
+		}
+
+		// Something is varied periodically as adjuster increases
+		// Giving stripes at integer values of adjusterOneCycle
+		adjusterOneCycle := make([]float64, 9)
+		for i := 0; i < 9; i++ {
+			adjusterOneCycle[i] = xSubPixels[i]
+			if GAP_IN_MIDDLE {
+				adjusterOneCycle[i] += 0.5
+			}
+		}
+
+		for i := 0; i < 9; i++ {
+			adjusterOneCycle[i] *= stripes
+		}
+
+		const SPRAY_PAINT_STRIPES = true
+		const LAMBERTIAN_STICKS = !SPRAY_PAINT_STRIPES
+		if (SPRAY_PAINT_STRIPES || LAMBERTIAN_STICKS) && !isBlockReward {
+			if depth > 0 || ADJUST_TOP_LEVEL {
+				// Let stripingMultiplier be a striping multiplier across transaction in direction of rotated vecX.
+
+				var modifiedTransR byte
+				var modifiedTransG byte
+				var modifiedTransB byte
+				var modifiedTransO byte
+				var stripingMultiplier float64
+				var stripingAlpha float64
+
+				if SPRAY_PAINT_STRIPES {
+					const GAP_TO_PIPE_RATIO = 5
+					brightness, alpha := sprayPaintProfile(adjusterOneCycle[4], GAP_TO_PIPE_RATIO)
+					stripingMultiplier = brightness
+					stripingAlpha = alpha
+				} else if LAMBERTIAN_STICKS {
+					// Lambertian pipe profile instead
+					const GAP_TO_PIPE_RATIO = 10
+					brightness, alpha := lambertianPipeProfile(adjusterOneCycle, GAP_TO_PIPE_RATIO)
+					stripingMultiplier = brightness
+					stripingAlpha = alpha
+				}
+				// Save time if we're not on or near a pipe
+				if stripingMultiplier == 0.0 {
+					newR = existingR
+					newG = existingG
+					newB = existingB
+					newO = existingO
+				} else {
+					modifiedTransR = byte(float64(transR) * stripingMultiplier)
+					modifiedTransG = byte(float64(transG) * stripingMultiplier)
+					modifiedTransB = byte(float64(transB) * stripingMultiplier)
+					modifiedTransO = byte(float64(transO) * stripingMultiplier)
+
+					// Instead of effectively "striping in black", we stripe in the transaction colour
+					amountTransaction := stripingAlpha
+					amountUnderlying := 1.0 - stripingAlpha
+					newR = byte(amountUnderlying*float64(existingR) + amountTransaction*float64(modifiedTransR))
+					newG = byte(amountUnderlying*float64(existingG) + amountTransaction*float64(modifiedTransG))
+					newB = byte(amountUnderlying*float64(existingB) + amountTransaction*float64(modifiedTransB))
+					newO = byte(amountUnderlying*float64(existingO) + amountTransaction*float64(modifiedTransO))
+				}
+			} else {
+				newR, newG, newB, newO = existingR, existingG, existingB, existingO
+			}
+		} else {
+			newR, newG, newB, newO = taintPixel(existingR, existingG, existingB, existingO, transR, transG, transB, transO, washProportion)
+		}
+	}
+
+	tp.replaceColour(x, y, newR, newG, newB, newO)
+	tp.pixelMutexes[y][x].Unlock()
+}
+
+func transactionBandingProfile(u floatCoords, uStart floatCoords, uEnd floatCoords, isFirstTxi bool, isLastTxi bool) float64 {
+	uWidth := uEnd - uStart
+	paramAcrossBand := (float64((u-uStart)/uWidth) - 0.5) * 2
+	//inFirstHalf := (paramAcrossBand < 0.0)
+
+	// Avoid banding for a transaction with a single input
+	if isFirstTxi && isLastTxi {
+		return 0.0
+	}
+
+	/*
+		// Avoid multiple layers of banding stripes (looks too strong!) at the edges of transactions
+		if inFirstHalf && isFirstTxi {
+			return 0.0
+		}
+		if !inFirstHalf && isLastTxi {
+			return 0.0
+		}*/
+
+	//sine := math.Sin(paramAcrossBand*math.Pi/2.0)*0.5 + 0.5
+	const SCALE = 0.0
+	const POWER = 2.0
+	const FLAT_PROPORTION = 1.0
+	return SCALE * (FLAT_PROPORTION + (1.0-FLAT_PROPORTION)*math.Pow(paramAcrossBand, POWER))
 }
 
 func (tp *transactionPixels) outputGraphicsFile(n int) error {
@@ -764,4 +1168,89 @@ func taintPixel(r byte, g byte, b byte, o byte, taintR byte, taintG byte, taintB
 		panic("oops")
 	}
 	return byte(rdashh), byte(gdashh), byte(bdashh), byte(odashh)
+}
+
+func HashOfInt(in uint64) [32]byte {
+	var bytes [8]byte
+	binary.LittleEndian.PutUint64(bytes[0:8], in)
+
+	h := sha256.New()
+	h.Write(bytes[0:8])
+
+	var outBytes [32]byte
+	o := h.Sum(nil)
+	for i := 0; i < len(o); i++ {
+		outBytes[i] = o[i]
+	}
+	return outBytes
+}
+
+// Pipes are centered at integer values of adjuster
+// We are given the number of pipes that would fit into each gap
+func lambertianPipeProfile(adjusters []float64, gapToPipeRatio float64) (float64, float64) {
+	numSubPixels := len(adjusters)
+	brightnesses := make([]float64, numSubPixels)
+	valids := make([]bool, numSubPixels)
+
+	for i := 0; i < numSubPixels; i++ {
+		// Nearest pipe
+		nearestPipe := math.Round(adjusters[i])
+		distToNearestPipe := math.Abs(adjusters[i] - nearestPipe)
+		// For a gap to pipe ratio of zero, pipe diameter is one (one pipe at each counting number)
+		// For a gap to pipe ratio of one, pipe diameter is a half (so a quarter radius, plus half gap, plus quarter radius between counting numbers)
+		// For a gap to pipe ratio of two, pipe diameter is a third
+		pipeDiameter := 1.0 / (gapToPipeRatio + 1.0)
+		numberOfPipeRadiiToNearestPipe := distToNearestPipe / (pipeDiameter / 2.0)
+		// If any subpixel is comfortably more than one pipe radius away, we can
+		// save time by just returning alpha of 0.0
+		if numberOfPipeRadiiToNearestPipe > 2.0 {
+			return 0.0, 0.0
+		}
+		if numberOfPipeRadiiToNearestPipe <= 1.0 {
+			// We are inside the pipe
+			cosine := math.Sqrt(1.0 - numberOfPipeRadiiToNearestPipe*numberOfPipeRadiiToNearestPipe)
+			brightnesses[i] = cosine
+			valids[i] = true
+		} else {
+			// Leave valid as false
+		}
+	}
+
+	total := 0.0
+	count := 0
+	for i := 0; i < numSubPixels; i++ {
+		if valids[i] {
+			total += brightnesses[i]
+			count++
+		}
+	}
+	alpha := float64(count) / float64(numSubPixels)
+	brightness := total / float64(count)
+	return brightness, alpha
+}
+
+// Pipes are centered at integer values of adjuster
+// We are given the number of pipes that would fit into each gap
+func sprayPaintProfile(adjuster float64, gapToPipeRatio float64) (float64, float64) {
+	var alpha float64
+
+	// Nearest pipe
+	nearestPipe := math.Round(adjuster)
+	distToNearestPipe := math.Abs(adjuster - nearestPipe)
+	// For a gap to pipe ratio of zero, pipe diameter is one (one pipe at each counting number)
+	// For a gap to pipe ratio of one, pipe diameter is a half (so a quarter radius, plus half gap, plus quarter radius between counting numbers)
+	// For a gap to pipe ratio of two, pipe diameter is a third
+	pipeDiameter := 1.0 / (gapToPipeRatio + 1.0)
+	numberOfPipeRadiiToNearestPipe := distToNearestPipe / (pipeDiameter / 2.0)
+	// A spray paint pipe actually extends beyond the radius (by twice as much, with some alpha at the edges
+	if numberOfPipeRadiiToNearestPipe <= 2.0 {
+		// We are inside the pipe
+		// Zero is the centre, pi is the transparent edge
+		cosineParam := numberOfPipeRadiiToNearestPipe * math.Pi / 2.0
+		cosine := math.Cos(cosineParam)
+		alpha = cosine/2.0 + 0.5
+		return 1.0, alpha
+	} else {
+		return 0.0, 0.0
+	}
 }
