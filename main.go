@@ -5,7 +5,7 @@ import (
 	"pudding-grid/blockchain"
 )
 
-const TransactionIndex = 1867248 // Transaction index to draw" (Pizza transaction)
+const TransactionIndex = 62417 // Transaction index to draw" (Pizza transaction)
 const Folder = "E:\\Data\\FleeSwallowImmune888888CswHashesDeleted"
 
 func main() {
@@ -14,8 +14,13 @@ func main() {
 		panic(err)
 	}
 
+	transHandle, err := chain.HandleCreator().TransactionHandleByHeight(TransactionIndex)
+	if err != nil {
+		panic(err)
+	}
+
 	fmt.Println("Starting...")
-	err = createTransactionImage(uint32(TransactionIndex), chain)
+	err = createTransactionImage(transHandle, chain)
 	if err != nil {
 		panic(err)
 	}

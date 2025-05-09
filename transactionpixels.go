@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/KitchenMishap/pudding-shed/chainreadinterface"
 	"math"
 	"os"
 	"pudding-grid/blockchain"
@@ -44,20 +45,9 @@ type transactionPixels struct {
 	maxGoroutines int
 	// How many goroutines we still have free
 	goroutines int
-	// The big arrays from the files
-	//firstTxi []uint64
-	//firstTxo []uint64
-	//txiTx    []uint32
-	//txiVout  []uint32
-	//txoValue []uint64
-	//red      []byte
-	//green    []byte
-	//blue     []byte
-	//octarine []byte
-	//hashMSBs []uint32
 
-	// The data in the above commented arrays are now provided by the following object
-	chain blockchain.ChainLikeFiles
+	// The data in the old arrays are now provided by the following object
+	chain blockchain.AccessChain
 }
 
 // Represents the data gathered regarding a pixel before a pixel is completely known
@@ -70,18 +60,21 @@ type transPixel struct {
 	areaEstimate          floatCoords
 }
 
-func createTransactionImage(transactionIndex uint32, chain blockchain.ChainReader) error {
+func createTransactionImage(transHandle chainreadinterface.ITransHandle, chain blockchain.AccessChain) error {
 	//for zoom := 1; zoom <= 1048576*1048576; zoom *= 4 {
 	for zoom := 1; zoom <= 1; zoom *= 4 {
 		tp := NewTransactionPixels(chain, floatCoords(zoom))
-		tp.drawTransactionPixels(transactionIndex)
-		tp.outputGraphicsFile(zoom)
+		tp.drawTransactionPixels(transHandle)
+		err := tp.outputGraphicsFile(zoom)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func NewTransactionPixels(chain blockchain.ChainLikeFiles, zoom floatCoords) *transactionPixels {
+func NewTransactionPixels(chain blockchain.AccessChain, zoom floatCoords) *transactionPixels {
 	tp := new(transactionPixels)
 	tp.width = 1000
 	tp.height = 1000
@@ -337,7 +330,7 @@ func (tp *transactionPixels) transactionToPixelCoords(x floatCoords, y floatCoor
 	return px, py
 }
 
-func (tp *transactionPixels) drawTransactionPixels(transactionIndex uint32) {
+func (tp *transactionPixels) drawTransactionPixels(transHandle chainreadinterface.ITransHandle) {
 	println("Starting")
 	finished := false
 	// First mark pixels outside transaction as black
@@ -367,12 +360,12 @@ func (tp *transactionPixels) drawTransactionPixels(transactionIndex uint32) {
 	// Second, delegate the transaction to the recursive function to
 	// find the colours within the transaction
 	// (Find the overall taint first)
-	hashMSB := tp.hashMSBs[transactionIndex]
+	hashMSB := tp.chain.GetHashMSBs(transHandle)
 	tr := byte((hashMSB & 0xFF000000) >> 24)
 	tg := byte((hashMSB & 0x00FF0000) >> 16)
 	tb := byte((hashMSB & 0x0000FF00) >> 8)
 	to := byte((hashMSB & 0x000000FF))
-	finished = finished || tp.drawTransactionRecurse(transactionIndex, 0.0, 1.0, 0.0, 1.0, true, 0, false, tr, tg, tb, to, 0.00)
+	finished = finished || tp.drawTransactionRecurse(transHandle, 0.0, 1.0, 0.0, 1.0, true, 0, false, tr, tg, tb, to, 0.00)
 	if finished {
 		println("Properly finished")
 	} else {
@@ -382,35 +375,55 @@ func (tp *transactionPixels) drawTransactionPixels(transactionIndex uint32) {
 }
 
 // Returns true if finished overall
-func (tp *transactionPixels) drawTransactionRecurse(transactionIndex uint32, left floatCoords, right floatCoords, top floatCoords, bottom floatCoords, xInsteadOfY bool, depth int, insistOneLastDepth bool, taintR byte, taintG byte, taintB byte, taintO byte, proportionTaint float64) bool {
+func (tp *transactionPixels) drawTransactionRecurse(transHandle chainreadinterface.ITransHandle, left floatCoords, right floatCoords, top floatCoords, bottom floatCoords, xInsteadOfY bool, depth int, insistOneLastDepth bool, taintR byte, taintG byte, taintB byte, taintO byte, proportionTaint float64) bool {
 	finished := false
-	// Gather / calculate some things...
 
-	// The average colour of the transaction before we recurse to higher detail and before we apply the taint
-	r := tp.red[transactionIndex]
-	g := tp.green[transactionIndex]
-	b := tp.blue[transactionIndex]
-	o := tp.octarine[transactionIndex]
+	// Gather / calculate some things...
+	trans, err := tp.chain.Blockchain().TransInterface(transHandle)
+	if err != nil {
+		panic(err)
+	}
+	hashMSBs := tp.chain.GetHashMSBs(transHandle)
+
+	// Is T a block reward? (no txis)
+	txiCount, err := trans.TxiCount()
+	if err != nil {
+		panic(err)
+	}
+	isBlockReward := (txiCount == 0)
+
+	// Work out the taint that the tx itself applies to its children
+	tr := byte((hashMSBs & 0xFF000000) >> 24)
+	tg := byte((hashMSBs & 0x00FF0000) >> 16)
+	tb := byte((hashMSBs & 0x0000FF00) >> 8)
+	to := byte((hashMSBs & 0x000000FF))
+
+	// The average colour of the transaction before we recurse to higher detail and before we apply the taint.
+	// We no longer generate a transaction colour database, as it quickly mushes to grey anyway.
+	// Nowadays, to save time, the colour is taken from the transaction hash as before, but if (as in most cases)
+	// the transaction has inputs, its assumed to be "mixed" into grey immediately, without true mixing
+	r := tr
+	g := tg
+	b := tb
+	o := to
+	if !isBlockReward {
+		r = 128
+		g = 128
+		b = 128
+		o = 128
+	}
 
 	// Apply the taint from the level above
 	// These numbers are only used if we don't recurse to the next level
 	r, g, b, o = taintPixel(r, g, b, o, taintR, taintG, taintB, taintO, proportionTaint)
 
-	// Work out the taint that the tx itself applies to its children
-	hashMSB := tp.hashMSBs[transactionIndex]
-	tr := byte((hashMSB & 0xFF000000) >> 24)
-	tg := byte((hashMSB & 0x00FF0000) >> 16)
-	tb := byte((hashMSB & 0x0000FF00) >> 8)
-	to := byte((hashMSB & 0x000000FF))
 	// And the taint amount. Scale the taint amount by the octarine to give various alphas
 	//ta := 0.15 * float64(to) / 255.0
 
 	ta := 0.00
 	// Only apply the taint if there are more than one inputs to the transaction
 	// #artisticlicense This avoids an image being "Broadly all one colour"
-	begbeg := tp.firstTxi[transactionIndex]
-	endend := tp.firstTxi[transactionIndex+1]
-	skipTaint := (endend-begbeg == 1)
+	skipTaint := (txiCount == 1)
 
 	// Adjust the taint amount
 	nextProportionTaint := proportionTaint + (1-proportionTaint)*ta
@@ -472,9 +485,6 @@ func (tp *transactionPixels) drawTransactionRecurse(transactionIndex uint32, lef
 	height := pixBottom - pixTop
 	letsGoDeeper := width*height > tp.areaThreshold
 	oneLastDepthWorthwhile := false
-
-	// Is T a block reward? (a single input from transaction zero)
-	isBlockReward := (tp.txiTx[tp.firstTxi[transactionIndex]] == 0)
 
 	var goDeeper bool
 	if isBlockReward {
@@ -560,18 +570,31 @@ func (tp *transactionPixels) drawTransactionRecurse(transactionIndex uint32, lef
 	} else {
 		// Recurse txi's of T
 		// First add up the bitcoin values of inputs so we know the ratios
-		total := uint64(0)
-		beg := tp.firstTxi[transactionIndex]
-		end := tp.firstTxi[transactionIndex+1]
-		for txi := beg; txi < end; txi++ {
-			// Get the transaction the input came from
-			tx := tp.txiTx[txi]
-			// Get the vout of the input
-			vout := tp.txiVout[txi]
-			// Get the txo index corresponding to the txi
-			txo := tp.firstTxo[tx] + uint64(vout)
+		total := int64(0)
+		count, err := trans.TxiCount()
+		if err != nil {
+			panic(err)
+		}
+		for txiInd := int64(0); txiInd < count; txiInd++ {
+			txiHandle, err := trans.NthTxi(txiInd)
+			if err != nil {
+				panic(err)
+			}
+			txi, err := tp.chain.Blockchain().TxiInterface(txiHandle)
+			if err != nil {
+				panic(err)
+			}
+			// Get the txo corresponding to the txi
+			txoHandle, err := txi.SourceTxo()
+			txo, err := tp.chain.Blockchain().TxoInterface(txoHandle)
+			if err != nil {
+				panic(err)
+			}
 			// Get the bitcoin value of the txo (in satoshis)
-			sats := tp.txoValue[txo]
+			sats, err := txo.Satoshis()
+			if err != nil {
+				panic(err)
+			}
 			total += sats
 		}
 		// Now recurse
@@ -587,23 +610,49 @@ func (tp *transactionPixels) drawTransactionRecurse(transactionIndex uint32, lef
 		// We want to do the biggest input first, as it is more likely to complete
 		// some pixels (and that will mean others might not need to be examined in depth).
 		// So gather the info we need about the inputs into arrays before we start with biggest.
-		var txs []uint32
+		var txs []chainreadinterface.ITransHandle
 		var sats []uint64
 		var zstarts []floatCoords
 		var zends []floatCoords
 		var dones []bool
-		for txi := tp.firstTxi[transactionIndex]; txi < tp.firstTxi[transactionIndex+1]; txi++ {
+		for txiInd := int64(0); txiInd < count; txiInd++ {
+			txiHandle, err := trans.NthTxi(txiInd)
+			if err != nil {
+				panic(err)
+			}
+			txi, err := tp.chain.Blockchain().TxiInterface(txiHandle)
+			if err != nil {
+				panic(err)
+			}
 			// Get the transaction the input came from
-			tx := tp.txiTx[txi]
-			txs = append(txs, tx)
-			// Get the vout of the input
-			vout := tp.txiVout[txi]
-			// Get the txo index corresponding to the txi
-			txo := tp.firstTxo[tx] + uint64(vout)
+			txoHandle, err := txi.SourceTxo()
+			txo, err := tp.chain.Blockchain().TxoInterface(txoHandle)
+			if err != nil {
+				panic(err)
+			}
 			// Get the bitcoin value of the txo (in satoshis)
-			sat := tp.txoValue[txo]
-			sats = append(sats, sat)
-			satSum += sat
+			sat, err := txo.Satoshis()
+			if err != nil {
+				panic(err)
+			}
+			txHandle := txo.ParentTrans()
+			if !txo.ParentSpecified() {
+				if !txo.TxoHeightSpecified() {
+					panic("how am I supposed to find the transaction then?")
+				}
+				t, err := tp.chain.Parents().ParentTransOfTxo(txo.TxoHeight())
+				if err != nil {
+					panic(err)
+				}
+				txHandle, err = tp.chain.HandleCreator().TransactionHandleByHeight(t)
+				if err != nil {
+					panic(err)
+				}
+			}
+
+			txs = append(txs, txHandle)
+			sats = append(sats, uint64(sat))
+			satSum += uint64(sat)
 
 			var z floatCoords
 			if xInsteadOfY {
@@ -639,12 +688,12 @@ func (tp *transactionPixels) drawTransactionRecurse(transactionIndex uint32, lef
 					routines++
 					// Pay attention here! Running an anonymous function as a goroutine
 					if xInsteadOfY {
-						go func(_tx uint32, _l floatCoords, _r floatCoords, _t floatCoords, _b floatCoords) {
+						go func(_tx chainreadinterface.ITransHandle, _l floatCoords, _r floatCoords, _t floatCoords, _b floatCoords) {
 							defer wg.Done()
 							tp.drawTransactionRecurse(_tx, _l, _r, _t, _b, false, depth+1, oneLastDepthWorthwhile, taintR, taintG, taintB, taintO, nextProportionTaint)
 						}(txs[biggestIndex], zstarts[biggestIndex], zends[biggestIndex], top, bottom)
 					} else {
-						go func(_tx uint32, _l floatCoords, _r floatCoords, _t floatCoords, _b floatCoords) {
+						go func(_tx chainreadinterface.ITransHandle, _l floatCoords, _r floatCoords, _t floatCoords, _b floatCoords) {
 							defer wg.Done()
 							tp.drawTransactionRecurse(_tx, _l, _r, _t, _b, true, depth+1, oneLastDepthWorthwhile, taintR, taintG, taintB, taintO, nextProportionTaint)
 						}(txs[biggestIndex], left, right, zstarts[biggestIndex], zends[biggestIndex])
