@@ -1023,7 +1023,7 @@ func (tp *transactionPixels) ApplyTransactionBandingToPixel(x int, y int,
 
 	const ADJUST_TOP_LEVEL = false
 	const GAP_IN_MIDDLE = true
-	const DIAGONAL_STUFF = true
+	const DIAGONAL_STUFF = false
 	if DIAGONAL_STUFF {
 		pixWidth := float64(transRight - transLeft)
 		pixHeight := float64(transBottom - transTop)
@@ -1128,6 +1128,9 @@ func (tp *transactionPixels) ApplyTransactionBandingToPixel(x int, y int,
 		} else {
 			newR, newG, newB, newO = taintPixel(existingR, existingG, existingB, existingO, transR, transG, transB, transO, washProportion)
 		}
+	} else {
+		// No diagonal stuff
+		newR, newG, newB, newO = existingR, existingG, existingB, existingO
 	}
 
 	tp.replaceColour(x, y, newR, newG, newB, newO)
