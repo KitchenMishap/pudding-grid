@@ -93,16 +93,16 @@ func createTransactionImage(transHandle chainreadinterface.ITransHandle, chain b
 func NewTransactionPixels(rootTransactionIndex int64, chain blockchain.AccessChain, zoom floatCoords) *transactionPixels {
 	tp := new(transactionPixels)
 	tp.rootTransactionIndex = rootTransactionIndex
-	tp.width = 1000
-	tp.height = 1000
+	//tp.width = 1000
+	//tp.height = 1000
 	//tp.width = 1920 // Full HD
 	//tp.height = 1080
 	//tp.width = 3440	// My monitor
 	//tp.height = 1440
 	//tp.width = 4950 // A3 300 DPI
 	//tp.height = 3510
-	//tp.width = 5905 // 50cm x 50cm 300 dpi
-	//tp.height = 5905
+	tp.width = 5905 // 50cm x 50cm 300 dpi
+	tp.height = 5905
 	//tp.width = 2882 // Marinas block
 	//tp.height = 2882
 	//tp.width = 2953 // Marinas shelf
