@@ -93,16 +93,16 @@ func createTransactionImage(transHandle chainreadinterface.ITransHandle, chain b
 func NewTransactionPixels(rootTransactionIndex int64, chain blockchain.AccessChain, zoom floatCoords) *transactionPixels {
 	tp := new(transactionPixels)
 	tp.rootTransactionIndex = rootTransactionIndex
-	//tp.width = 1000
-	//tp.height = 1000
+	tp.width = 1000
+	tp.height = 1000
 	//tp.width = 1920 // Full HD
 	//tp.height = 1080
 	//tp.width = 3440	// My monitor
 	//tp.height = 1440
 	//tp.width = 4950 // A3 300 DPI
 	//tp.height = 3510
-	tp.width = 5905 // 50cm x 50cm 300 dpi
-	tp.height = 5905
+	//tp.width = 5905 // 50cm x 50cm 300 dpi
+	//tp.height = 5905
 	//tp.width = 2882 // Marinas block
 	//tp.height = 2882
 	//tp.width = 2953 // Marinas shelf
@@ -421,7 +421,7 @@ func (tp *transactionPixels) drawTransactionPixels(transaction chainreadinterfac
 // The names U,V are used for "sense co-ords", and either equal (X,Y) or (Y,X). U spans across transaction banding profile, V spans across transaction inputs.
 func (tp *transactionPixels) drawTransactionRecurse(transaction chainreadinterface.ITransaction, addressHashMSBs uint32, useUnitSquare bool, leftX floatCoords, rightX floatCoords, topY floatCoords, bottomY floatCoords, depth int, insistOneLastDepth bool, isFirstTxi bool, isLastTxi bool) bool {
 	// transaction can be nil if we are a UTXO and we have reversed time
-	const REVERSE_TIME = true
+	const REVERSE_TIME = false
 	useUnitSquare = false
 	// splitter := SplitRectSlabs{}
 	splitter := SquarifySplitter{}
@@ -1077,7 +1077,7 @@ func (tp *transactionPixels) ApplyTransactionBandingToPixel(x int, y int,
 			adjusterOneCycle[i] *= stripes
 		}
 
-		const SPRAY_PAINT_STRIPES = true
+		const SPRAY_PAINT_STRIPES = false
 		const LAMBERTIAN_STICKS = !SPRAY_PAINT_STRIPES
 		if (SPRAY_PAINT_STRIPES || LAMBERTIAN_STICKS) && !isBlockReward {
 			if depth > 0 || ADJUST_TOP_LEVEL {
