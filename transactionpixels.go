@@ -421,7 +421,7 @@ func (tp *transactionPixels) drawTransactionPixels(transaction chainreadinterfac
 // The names U,V are used for "sense co-ords", and either equal (X,Y) or (Y,X). U spans across transaction banding profile, V spans across transaction inputs.
 func (tp *transactionPixels) drawTransactionRecurse(transaction chainreadinterface.ITransaction, addressHashMSBs uint32, useUnitSquare bool, leftX floatCoords, rightX floatCoords, topY floatCoords, bottomY floatCoords, depth int, insistOneLastDepth bool, isFirstTxi bool, isLastTxi bool) bool {
 	// transaction can be nil if we are a UTXO and we have reversed time
-	const REVERSE_TIME = false
+	const REVERSE_TIME = true
 	useUnitSquare = false
 	// splitter := SplitRectSlabs{}
 	splitter := SquarifySplitter{}
